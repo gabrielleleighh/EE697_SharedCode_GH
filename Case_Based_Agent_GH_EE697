@@ -1,0 +1,144 @@
+
+#packages REQUIRED to run the following script 
+
+using StatsBase #used for weight sampling
+using Random #needed for making non stationary data
+using Statistics #mean, median, etc , used for plotting option and avg  rewards
+using Dates # for the timing
+using LinearAlgebra  # needed to normalize our data
+
+
+# KL Divergence Algorithm ( what is the difference between two probability distributions?) 
+function kl_divergence(p::Vector{Float64}, q::Vector{Float64})
+    ε = 1e-8
+    p = p .+ ε
+    q = q .+ ε
+    return sum(p .* log.(p ./ q))
+end
+
+# Define Case Struct , this is defines a composite data type (like a class or record) 
+#that groups related information into one object.
+struct Case
+    state::Int
+    arm::Int
+    reward::Float64
+    next_state::Int
+end
+
+# Define Case-Based Bandit Agent
+#This agent is designed to learn from past interactions — not necessarily through value functions or neural networks, 
+#but by memorizing individual cases and using them to decide future actions.
+mutable struct CaseBasedBandit
+    n_arms::Int
+    n_states::Int
+    epsilon::Float64
+    memory::Vector{Case}
+end
+
+#gives you a clean and convenient way to create a new CaseBasedBandit without manually 
+#passing in the empty memory
+
+function CaseBasedBandit(n_arms::Int, n_states::Int; epsilon=0.1)
+    return CaseBasedBandit(n_arms, n_states, epsilon, Case[])
+end
+
+# Arm Selection Based on Memory 
+function select_arm(agent::CaseBasedBandit, state::Int)
+    if rand() < agent.epsilon || isempty(agent.memory)
+        return rand(1:agent.n_arms)
+    end
+
+    # Find all past cases with same state
+    state_cases = filter(c -> c.state == state, agent.memory)
+
+    if isempty(state_cases)
+        return rand(1:agent.n_arms)
+    end
+
+    # Average reward by arm
+    arm_rewards = zeros(agent.n_arms)
+    arm_counts = zeros(Int, agent.n_arms)
+
+    for c in state_cases
+        arm_rewards[c.arm] += c.reward
+        arm_counts[c.arm] += 1
+    end
+
+    avg_rewards = ifelse.(arm_counts .> 0, arm_rewards ./ arm_counts, -Inf)
+    return argmax(avg_rewards)
+end
+
+#store case
+function update!(agent::CaseBasedBandit, state::Int, arm::Int, reward::Float64, next_state::Int)
+    push!(agent.memory, Case(state, arm, reward, next_state))
+end
+
+# simulate covariate shift in state distribution 
+function simulate_covariate_shift(rounds, n_states)
+    state_probs = fill(1.0 / n_states, n_states)
+    state_history = Vector{Int}()
+    prob_history = []
+
+    for t in 1:rounds
+        if t == Int(rounds * 0.5)
+            state_probs = normalize(rand(n_states), 1)
+            println("Covariate shift detected at round: ", t)
+        end
+
+        push!(prob_history, copy(state_probs))
+        state = sample(1:n_states, Weights(state_probs))
+        push!(state_history, state)
+    end
+
+    return state_history, prob_history
+end
+
+# main loop 
+function run_case_based_mab_with_shift()
+    n_arms = 5
+    n_states = 10
+    rounds = 500
+    agent = CaseBasedBandit(n_arms, n_states, epsilon=0.1)
+
+    state_history, prob_history = simulate_covariate_shift(rounds, n_states)
+    total_rewards = Float64[]
+    correct_preds = 0
+
+    println("Training started...")
+    start_time = time()
+
+    for t in 1:rounds
+        state = state_history[t]
+        arm = select_arm(agent, state)
+
+        correct_arm = mod(state + t, n_arms) + 1
+        reward = rand() < (0.6 + 0.4 * (arm == correct_arm)) ? 1.0 : 0.0
+
+        if arm == correct_arm
+            correct_preds += 1
+        end
+
+        next_state = rand(1:n_states)
+        update!(agent, state, arm, reward, next_state)
+        push!(total_rewards, reward)
+
+        # KL-based shift detection
+        if t > 10 && t % 10 == 0
+            p = prob_history[t - 10]
+            q = prob_history[t]
+            kl = kl_divergence(p, q)
+            if kl > 0.5
+                println("Covariate shift flagged at round $t with KL divergence = $(round(kl, digits=3))")
+            end
+        end
+    end
+
+    elapsed = time() - start_time
+
+    println("Training complete.")
+    println("Average reward: ", mean(total_rewards))
+    println("Accuracy: ", correct_preds / rounds)
+    println("Elapsed time (seconds): ", round(elapsed, digits=4))
+end
+
+run_case_based_mab_with_shift()
