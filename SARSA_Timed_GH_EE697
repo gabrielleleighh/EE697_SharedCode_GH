@@ -1,0 +1,84 @@
+# packages needed, run “import Pkg; Pkg.add("")” if not imported to your terminal 
+using Random
+using Statistics
+using Plots
+
+# non-stationary data generator with positive rewards only
+function generate_rewards(state::Int, episode::Int, change_point::Int)
+    # Reward change halfway through
+    if episode < change_point
+        return abs(rand())  # Positive reward (between 0 and 1)
+    else
+        return abs(rand() * 5)  # Positive reward (between 0 and 5)
+    end
+end
+
+# ε-greedy policy
+function epsilon_greedy(Q::Matrix{Float64}, state::Int, epsilon::Float64, actions::Int)
+    if rand() < epsilon
+        return rand(1:actions)  # Choose random action (explore)
+    else
+        return argmax(Q[state, :])  # Choose action with the highest Q-value (exploit)
+    end
+end
+
+# SARSA algorithm with data-driven non-stationary environment
+function sarsa(iterations, alpha, gamma, epsilon)
+    n_states = 5  # the number of states
+    n_actions = 2  # the number of actions (0: left, 1: right), is logic used 
+    Q = zeros(n_states, n_actions)  # initializes the Q-table
+
+    rewards_per_episode = zeros(iterations)
+    correct_action_per_episode = falses(iterations)
+    change_point = Int(iterations / 2)  # Halfway point for reward shift
+
+    # Start the timer using @elapsed
+    elapsed_time = @elapsed begin
+        for episode in 1:iterations
+            state = 1  # start at initial state
+            total_reward = 0.0
+
+            # choose action using epsilon-greedy policy
+            action = epsilon_greedy(Q, state, epsilon, n_actions)
+
+            while state != 5  # let's assume state 5 is terminal ( can be updated or changed)
+                # Track accuracy: is selected action currently the best?
+                best_action = argmax(Q[state, :])
+                if action == best_action
+                    correct_action_per_episode[episode] = true
+                end
+
+                reward = generate_rewards(state, episode, change_point)
+                total_reward += reward 
+                # the reward just received is added to the total reward for tracking performance across an episode
+                
+                 next_state = mod(state + action - 1, n_states) + 1  # move to next state
+
+                next_action = epsilon_greedy(Q, next_state, epsilon, n_actions)
+
+                Q[state, action] += alpha * (reward + gamma * Q[next_state, next_action] - Q[state, action])
+
+                state = next_state
+                action = next_action
+            end
+
+            rewards_per_episode[episode] = total_reward
+        end
+    end
+
+    accuracy = mean(correct_action_per_episode)
+
+    println("\n mySARSA Learning Summary ")
+    println("Total Time: ", round(elapsed_time, digits=4), " seconds")
+    println("Average Reward: ", round(mean(rewards_per_episode), digits=3))
+    println("Accuracy: ", round(accuracy, digits=4))
+
+    return Q, rewards_per_episode, accuracy
+end
+
+# call the function to run
+Q_table, rewards, accuracy = sarsa(1000, 0.1, 0.9, 0.1)
+
+println("\nLearned Q-Table using SARSA:")
+println(round.(Q_table, digits=3))
+
