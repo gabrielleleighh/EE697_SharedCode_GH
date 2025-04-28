@@ -1,0 +1,94 @@
+# packages needed to run this script
+using Flux
+using Random
+using Statistics
+using BenchmarkTools
+using Distributions  # For categorical sampling
+
+# define the policy network (simple MLP)
+const PolicyNetwork = Chain(
+    Dense(4, 24, relu),
+    Dense(24, 24, relu),
+    Dense(24, 2)  # Assuming 2 possible actions
+)
+
+# setup optimizer with our model parameters
+optimizer = Flux.setup(Adam(0.01), PolicyNetwork)
+
+# simulate a simple environment (4 state dimensions, 2 possible actions)
+state_space = 4
+action_space = 2
+
+# data generator function that shifts halfway, this can be changed to simulate other non-stationary sets
+function generate_environment(episode::Int64, state::Vector{Float32})
+    if episode < 20
+        state .= rand(Float32, state_space)
+        reward = sum(state)
+    else
+        state .= rand(Float32, state_space) .- 0.5f0
+        reward = -sum(state)
+    end
+    done = false  # Environment never ends in this example
+    return state, reward, done
+end
+
+# defines the policy gradient algorithm (REINFORCE)
+function train_policy_gradient(policy, optimizer, num_episodes::Int64, gamma::Float64)
+    total_rewards = Float64[]
+    start_time = time()
+
+    for episode in 1:num_episodes
+        state = rand(Float32, state_space)
+        total_reward = 0.0
+        log_probs = Float64[]
+        rewards = Float64[]
+        max_steps = 50  # Cap to prevent infinite loop
+
+        for step in 1:max_steps
+            action_logits = policy(state)
+            action_probs = softmax(action_logits)
+            action_dist = Categorical(action_probs)
+            action = rand(action_dist)
+
+            push!(log_probs, log(action_probs[action]))
+            next_state, reward, _ = generate_environment(episode, state)
+            push!(rewards, reward)
+            total_reward += reward
+            state = next_state
+        end
+
+        # computes the discounted rewards
+        returns = reverse(cumsum(reverse(rewards)))
+
+        # compute loss and tha gradients
+        loss, grads = Flux.withgradient(policy) do p
+            sum(-log_probs[i] * returns[i] for i in 1:length(rewards))
+        end
+
+        Flux.update!(optimizer, policy, grads)
+        push!(total_rewards, total_reward)
+
+        if episode % 10 == 0
+            println("Episode $episode: Total Rewards = $total_reward")
+        end
+    end
+
+    elapsed_time = time() - start_time
+    println("Training completed in $elapsed_time seconds")
+    return total_rewards
+end
+
+# main function to run the training process
+function main()
+    num_episodes = 20
+    gamma = 0.99  # Discount factor (not currently used in returns), this can be changed for better accuracy!
+
+    println("Starting to training...")
+    total_rewards = train_policy_gradient(PolicyNetwork, optimizer, num_episodes, gamma)
+
+    println("Training complete.")
+ 
+end
+
+# calling back the function.
+main()
