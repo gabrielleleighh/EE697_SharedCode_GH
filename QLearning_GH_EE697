@@ -1,0 +1,70 @@
+#packages needed to run following algorithm GH
+using Random
+using Statistics
+using Plots
+
+# Non-stationary reward generator
+function generate_rewards(state::Int, episode::Int)
+    return episode < 500 ? abs(rand()) : abs(rand() * 5)
+end
+
+# ε-greedy policy 
+function epsilon_greedy(Q::Matrix{Float64}, state::Int, epsilon::Float64, actions::Int)
+    if rand() < epsilon
+        return rand(1:actions)  # Explore
+    else
+        return argmax(Q[state, :])  # Exploit
+    end
+end
+
+# === Q-Learning algorithm with accuracy ===
+function q_learning(iterations, alpha, gamma, epsilon)
+    n_states = 5
+    n_actions = 2
+    Q = zeros(n_states, n_actions)
+
+    rewards_per_episode = zeros(iterations)
+    correct_action_per_episode = falses(iterations)
+
+    elapsed_time = @elapsed begin
+        for episode in 1:iterations
+            state = 1
+            total_reward = 0.0
+
+            while state != 5  # Assume state 5 is terminal
+                action = epsilon_greedy(Q, state, epsilon, n_actions)
+
+                # Track accuracy: is selected action currently the best?
+                best_action = argmax(Q[state, :])
+                if action == best_action
+                    correct_action_per_episode[episode] = true
+                end
+
+                next_state = mod(state + action - 1, n_states) + 1
+                reward = generate_rewards(state, episode)
+                total_reward += reward
+
+                Q[state, action] += alpha * (reward + gamma * maximum(Q[next_state, :]) - Q[state, action])
+                state = next_state
+            end
+
+            rewards_per_episode[episode] = total_reward
+        end
+    end
+
+    accuracy = mean(correct_action_per_episode)
+
+    # Output Summary ( what we want to print) 
+    println("\nmyLearned Q-Learning Summary")
+    println("Total Time: ", round(elapsed_time, digits=4), " seconds")
+    println("Average Reward: ", round(mean(rewards_per_episode), digits=3))
+    println("Accuracy: ", round(accuracy, digits=4))
+
+    return Q, rewards_per_episode, accuracy
+end
+
+# === Run Q-learning ===
+Q_table, rewards, accuracy = q_learning(1000, 0.1, 0.9, 0.1)
+
+println("\nmyLearned Q-Table using Q-Learning:")
+println(round.(Q_table, digits=3))
