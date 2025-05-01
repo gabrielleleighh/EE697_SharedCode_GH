@@ -1,0 +1,87 @@
+# packages needed for the script gh
+using CSV
+using DataFrames
+using Random
+using Plots
+using Distributions
+using Flux
+
+# loads the dataset
+function load_data()
+    filename = "example1_ee697.csv"
+    return CSV.read(filename, DataFrame)
+end
+
+# apply sliding window approach params gh
+define_window_size = 30  # number of data points per window , adjustable
+step_size = 7  # step size to slide the window
+
+# process the data into input (X) and output (y)
+function process_data(data::DataFrame)
+    X = hcat(data.Open, data.High)  # Ensures features are a matrix
+    y = reshape(data.Close, :, 1)  # Converts target variable into a column matrix
+    return X, y
+end
+
+
+# KL Divergence function for concept drift detection
+function kl_divergence(p, q)
+    return sum(p .* log.(p ./ (q .+ 1e-8)))  # Small epsilon to avoid log(0)
+end
+
+# define Multi-Armed Bandit Q-functions
+q_functions = Dict(
+    "stable" => Chain(Dense(2, 16, relu), Dense(16, 8, relu), Dense(8, 1, sigmoid)),
+    "moderate_shift" => Chain(Dense(2, 16, relu), Dense(16, 8, relu), Dense(8, 1, sigmoid)),
+    "severe_shift" => Chain(Dense(2, 16, relu), Dense(16, 8, relu), Dense(8, 1, sigmoid))
+)
+
+# select Q-function based on detected shift
+function select_q_function(kl_score)
+    if kl_score > 1.5
+        println("severe shift detected, switching to severe Q-function.")
+        return q_functions["severe_shift"]
+    elseif kl_score > 0.7
+        println("moderate shift detected, switching to moderate Q-function.")
+        return q_functions["moderate_shift"]
+    else
+        println("no significant shift. Using stable Q-function.")
+        return q_functions["stable"]
+    end
+end
+
+# this update the world model with the latest data gh
+function update_world_model!(X_new, y_new, model, opt)
+    println("Updating world model with new data...")
+    loss(x, y) = Flux.mse(model(x), y)
+    for epoch in 1:20
+        grads = gradient(() -> loss(X_new', y_new'), Flux.params(model))
+        Flux.update!(opt, Flux.params(model), grads)
+    end
+end
+
+# Main function applying the sliding window approach
+function main()
+    data = load_data()
+    X, y = process_data(data)
+    opt = Flux.ADAM(0.01)
+    model = q_functions["stable"]  # Start with the stable model
+
+    for i in 1:step_size:(size(X, 1) - define_window_size)
+        X_train = X[i:(i + define_window_size - 1), :]
+        y_train = y[i:(i + define_window_size - 1), :]
+        X_test = X[(i + step_size):(i + define_window_size + step_size - 1), :]
+        y_test = y[(i + step_size):(i + define_window_size + step_size - 1), :]
+
+        # detect shift using KL divergence
+        kl_score = kl_divergence(mean(model(X_train')), mean(model(X_test')))
+        println("KL Divergence Score: ", kl_score)
+        selected_q_function = select_q_function(kl_score)
+
+        # update the model dynamically if needed
+        update_world_model!(X_test, y_test, selected_q_function, opt)
+    end
+end
+
+main()
+
