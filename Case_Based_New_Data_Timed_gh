@@ -1,0 +1,140 @@
+#packages needed to run this alogrithm 
+using StatsBase
+using Random
+using Statistics
+using Dates
+
+# computes the KL divergence between two distributions (p and q)
+function kl_divergence(p::Vector{Float64}, q::Vector{Float64})
+    ε = 1e-8  # small constant to avoid division by zero
+    p = p .+ ε
+    q = q .+ ε
+    return sum(p .* log.(p ./ q))
+end
+
+# defines a case for memory storage (state, arm, reward, next_state)
+struct Case
+    state::Int
+    arm::Int
+    reward::Float64
+    next_state::Int
+end
+
+# defines a case-based bandit agent with memory gh
+mutable struct CaseBasedBandit
+    n_arms::Int
+    n_states::Int
+    epsilon::Float64
+    memory::Vector{Case}
+end
+
+# constructor for the case-based bandit agent
+function CaseBasedBandit(n_arms::Int, n_states::Int; epsilon=0.1)
+    return CaseBasedBandit(n_arms, n_states, epsilon, Case[])
+end
+
+# selects an arm using memory of past experiences, with recency weighting
+function select_arm(agent::CaseBasedBandit, state::Int)
+    # explore randomly if epsilon threshold is met or memory is empty
+    if rand() < agent.epsilon || isempty(agent.memory)
+        return rand(1:agent.n_arms)
+    end
+
+    # filter cases that match the current state
+    state_cases = filter(c -> c.state == state, agent.memory)
+    if isempty(state_cases)
+        return rand(1:agent.n_arms)
+    end
+
+    # compute recency-weighted average reward per arm
+    arm_rewards = zeros(agent.n_arms)
+    arm_counts = zeros(Float64, agent.n_arms)
+
+    for i in 1:length(state_cases)
+        c = state_cases[i]
+        weight = exp(-0.01 * (length(state_cases) - i))  # newer cases weigh more
+        arm_rewards[c.arm] += c.reward * weight
+        arm_counts[c.arm] += weight
+    end
+
+    # calculate average reward and select the best arm
+    avg_rewards = ifelse.(arm_counts .> 0, arm_rewards ./ arm_counts, -Inf)
+    return argmax(avg_rewards)
+end
+
+# adds a new experience to the agent's memory
+function update!(agent::CaseBasedBandit, state::Int, arm::Int, reward::Float64, next_state::Int)
+    push!(agent.memory, Case(state, arm, reward, next_state))
+end
+
+# generates a reward probability matrix where each arm's reward drifts over time
+function generate_drifting_probs(n_arms, rounds)
+    probs = Matrix{Float64}(undef, n_arms, rounds)
+    for a in 1:n_arms
+        for t in 1:rounds
+            # sinusoidal drift pattern bounded between 0.1 and 0.9
+            probs[a, t] = 0.5 + 0.4 * sin(2π * t / (200 + 20 * a))
+        end
+    end
+    return probs
+end
+
+# main simulation loop with drifting reward probabilities
+function run_case_based_mab_with_drifting_rewards()
+    n_arms = 5
+    n_states = 10
+    rounds = 500
+    agent = CaseBasedBandit(n_arms, n_states, epsilon=0.1)
+
+    state_history = [rand(1:n_states) for _ in 1:rounds]
+    total_rewards = Float64[]
+    correct_preds = 0
+
+    arm_probs = generate_drifting_probs(n_arms, rounds)
+
+    println("training started...")
+    start_time = time()
+
+    for t in 1:rounds
+        state = state_history[t]
+        
+        # gradually decay epsilon to reduce exploration over time
+        agent.epsilon = max(0.01, 0.1 * exp(-0.002 * t))
+        arm = select_arm(agent, state)
+
+        # get reward based on current arm's drifted probability
+        reward_prob = arm_probs[arm, t]
+        reward = rand() < reward_prob ? 1.0 : 0.0
+
+        # count if agent picked the best arm at this time step
+        best_arm = argmax(arm_probs[:, t])
+        if arm == best_arm
+            correct_preds += 1
+        end
+
+        next_state = rand(1:n_states)
+        update!(agent, state, arm, reward, next_state)
+        push!(total_rewards, reward)
+
+        # optionally detect large reward distribution shifts via KL divergence
+        if t > 10 && t % 10 == 0
+            p = arm_probs[:, t - 10]
+            q = arm_probs[:, t]
+            kl = kl_divergence(p, q)
+            if kl > 0.3
+                println("reward drift detected at round $t with KL divergence = $(round(kl, digits=3))") # tells us where changes are detected
+                agent.epsilon = 0.5  # temporarily increase exploration
+            end
+        end
+    end
+
+    elapsed = time() - start_time
+
+    println("Training complete.")
+    println("Average reward: ", mean(total_rewards))
+    println("Accuracy (best arm picked): ", correct_preds / rounds)
+    println("Elapsed time (seconds): ", round(elapsed, digits=4))
+end
+
+# run the simulation
+run_case_based_mab_with_drifting_rewards()
