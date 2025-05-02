@@ -1,0 +1,203 @@
+using StatsBase
+using Random
+using Statistics
+using Dates
+using LinearAlgebra
+
+# computes kl divergence between two probability distributions
+function kl_divergence(p::Vector{Float64}, q::Vector{Float64})
+    ε = 1e-8  # small constant to avoid log(0)
+    p = p .+ ε
+    q = q .+ ε
+    return sum(p .* log.(p ./ q))
+end
+
+# define a single case representing one experience tuple
+struct Case
+    state::Int
+    arm::Int
+    reward::Float64
+    next_state::Int
+end
+
+# define the case-based bandit agent with memory
+mutable struct CaseBasedBandit
+    n_arms::Int
+    n_states::Int
+    epsilon::Float64
+    memory::Vector{Case}
+end
+
+# constructor for the case-based bandit
+function CaseBasedBandit(n_arms::Int, n_states::Int; epsilon=0.1)
+    return CaseBasedBandit(n_arms, n_states, epsilon, Case[])
+end
+
+# select an arm using case memory and epsilon-greedy strategy
+function select_arm(agent::CaseBasedBandit, state::Int)
+    if rand() < agent.epsilon || isempty(agent.memory)
+        return rand(1:agent.n_arms)  # explore
+    end
+
+    # retrieve past cases for the current state
+    state_cases = filter(c -> c.state == state, agent.memory)
+
+    if isempty(state_cases)
+        return rand(1:agent.n_arms)  # no prior data for this state
+    end
+
+    # aggregate rewards by arm
+    arm_rewards = zeros(agent.n_arms)
+    arm_counts = zeros(Int, agent.n_arms)
+
+    for c in state_cases
+        arm_rewards[c.arm] += c.reward
+        arm_counts[c.arm] += 1
+    end
+
+    # compute average rewards and select arm with max expected value
+    avg_rewards = ifelse.(arm_counts .> 0, arm_rewards ./ arm_counts, -Inf)
+    return argmax(avg_rewards)
+end
+
+# store a new case in memory
+function update!(agent::CaseBasedBandit, state::Int, arm::Int, reward::Float64, next_state::Int)
+    push!(agent.memory, Case(state, arm, reward, next_state))
+end
+
+# simulate covariate shift by changing state probabilities mid-way
+function simulate_covariate_shift(rounds, n_states)
+    state_probs = fill(1.0 / n_states, n_states)
+    state_history = Vector{Int}()
+    prob_history = []
+
+    for t in 1:rounds
+        if t == Int(rounds * 0.5)
+            state_probs = normalize(rand(n_states), 1)  # simulate a sudden shift
+            println("covariate shift detected at round: ", t)
+        end
+
+        push!(prob_history, copy(state_probs))
+        state = sample(1:n_states, Weights(state_probs))
+        push!(state_history, state)
+    end
+
+    return state_history, prob_history
+end
+
+# run agent in environment with covariate (state) shift
+function run_case_based_mab_with_shift()
+    n_arms = 5
+    n_states = 10
+    rounds = 500
+    agent = CaseBasedBandit(n_arms, n_states, epsilon=0.1)
+
+    state_history, prob_history = simulate_covariate_shift(rounds, n_states)
+    total_rewards = Float64[]
+    correct_preds = 0
+
+    println("running with covariate shift")
+    start_time = time()
+
+    for t in 1:rounds
+        state = state_history[t]
+        arm = select_arm(agent, state)
+
+        # define best arm based on state and time
+        correct_arm = mod(state + t, n_arms) + 1
+        reward = rand() < (0.6 + 0.4 * (arm == correct_arm)) ? 1.0 : 0.0
+
+        if arm == correct_arm
+            correct_preds += 1
+        end
+
+        next_state = rand(1:n_states)
+        update!(agent, state, arm, reward, next_state)
+        push!(total_rewards, reward)
+
+        # detect covariate shift using kl divergence
+        if t > 10 && t % 10 == 0
+            p = prob_history[t - 10]
+            q = prob_history[t]
+            kl = kl_divergence(p, q)
+            if kl > 0.5
+                println("covariate shift flagged at round $t with kl divergence = $(round(kl, digits=3))")
+            end
+        end
+    end
+
+    elapsed = time() - start_time
+
+    println("training complete.")
+    println("average reward: ", mean(total_rewards))
+    println("accuracy: ", correct_preds / rounds)
+    println("elapsed time (seconds): ", round(elapsed, digits=4))
+end
+
+# generate smoothly drifting reward probabilities for each arm
+function generate_drifting_probs(n_arms, rounds)
+    probs = Matrix{Float64}(undef, n_arms, rounds)
+    for a in 1:n_arms
+        for t in 1:rounds
+            # sine-based drift to simulate changing reward landscape
+            probs[a, t] = 0.5 + 0.4 * sin(2π * t / (200 + 20 * a))
+        end
+    end
+    return probs
+end
+
+# run agent in environment with drifting reward distributions
+function run_case_based_mab_with_drifting_rewards()
+    n_arms = 5
+    n_states = 10
+    rounds = 500
+    agent = CaseBasedBandit(n_arms, n_states, epsilon=0.1)
+
+    state_history = [rand(1:n_states) for _ in 1:rounds]
+    total_rewards = Float64[]
+    correct_preds = 0
+
+    arm_probs = generate_drifting_probs(n_arms, rounds)
+
+    println("running with drifting reward probabilities")
+    start_time = time()
+
+    for t in 1:rounds
+        state = state_history[t]
+        arm = select_arm(agent, state)
+
+        reward_prob = arm_probs[arm, t]
+        reward = rand() < reward_prob ? 1.0 : 0.0
+
+        best_arm = argmax(arm_probs[:, t])
+        if arm == best_arm
+            correct_preds += 1
+        end
+
+        next_state = rand(1:n_states)
+        update!(agent, state, arm, reward, next_state)
+        push!(total_rewards, reward)
+
+        # detect major reward shift every 10 rounds
+        if t > 10 && t % 10 == 0
+            p = arm_probs[:, t - 10]
+            q = arm_probs[:, t]
+            kl = kl_divergence(p, q)
+            if kl > 0.3
+                println("reward shift flagged at round $t with kl divergence = $(round(kl, digits=3))")
+            end
+        end
+    end
+
+    elapsed = time() - start_time
+
+    println("training complete.")
+    println("average reward: ", mean(total_rewards))
+    println("accuracy (best arm picked): ", correct_preds / rounds)
+    println("elapsed time (seconds): ", round(elapsed, digits=4))
+end
+
+# run both experiments
+run_case_based_mab_with_shift()
+println("\n" * "="^60 * "\n")
+run_case_based_mab_with_drifting_rewards()
